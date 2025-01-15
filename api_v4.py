@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
 
+
 settings = Settings()
 airtable_base_id = "apps3g53eD7Wzn7rE"
 airtable_table_name = "Companies"
@@ -39,7 +40,7 @@ async def update_airtable_record(record_id: str, field_data: dict):
 
 @app.get("/")
 async def root():
-    print("parappappero")
+    print("para")
     return {"message": "Hello World"}
 # Endpoint to create an OpenAI Assistant ID and update Airtable
 
