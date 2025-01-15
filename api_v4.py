@@ -40,7 +40,7 @@ async def update_airtable_record(record_id: str, field_data: dict):
 
 @app.get("/")
 async def root():
-    print("para")
+    print("parapp")
     return {"message": "Hello World"}
 # Endpoint to create an OpenAI Assistant ID and update Airtable
 
