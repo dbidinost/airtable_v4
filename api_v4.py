@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 import httpx
 import os 
+import uvicorn
 from pyairtable import Api
 
 class Settings(BaseSettings):
