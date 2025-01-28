@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Response # type: ignore
-
+from datetime import datetime
 #from fastapi import JSONResponse, RedirectResponse # type: ignore
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings # type: ignore
@@ -32,11 +32,11 @@ async def root():
 # Endpoint to create an OpenAI Assistant ID and update Airtable:
 @app.post("/create-assistant/{record_id}")
 async def create_assistant(record_id: str):
-    print("create_assistant, record:", record_id)
+    print(f"Create_Assistant, record:{record_id} at: {datetime.now()}")
     record = await fetch_airtable_record("Companies", record_id, settings)
     # Assuming the file URL is stored under "file_url"
-    
-    print("Company Record", record)
+ 
+    print("Company Record", record['fields'].get('Company Name', 'No Company Name'))
     file_url = record['fields'].get('Attachments', [])
     
     if not file_url:
@@ -51,7 +51,8 @@ async def create_assistant(record_id: str):
 # record_id is the record ID of the Match record
 @app.post("/process-match/{record_id}")
 async def use_openai(record_id: str):
-    print("Process match, record:", record_id)
+    #print("Process match, record:", record_id)
+    print(f"Match Started, record:{record_id} at: {datetime.now()}")
     record = await fetch_airtable_record("Matches", record_id, settings)
 
     async_result = await v4_process_match(record, settings)
