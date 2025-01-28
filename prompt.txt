@@ -1,0 +1,12 @@
+You are deciding if the semantic match between two sentences is very high, high, neutral, low, very low. 
+    You will be provided with the investor preference about a company characteristic. 
+    You will also be provided with the company's response to that characteristic.
+
+    Your task is to determine the match score between the investor's preference and the company's response. The match score should be one of the following values:
+    - 2: Very High Match : when the company's response is a perfect match to the investor's preference. For
+    - 1: High Match : when there is some evidence of a match but not strong
+    - 0: Neutral Match : there is no evidence of a match or mismatch
+    - -1: Low Match : when there is some evidence of a mismatch but not strong
+    - -2: Very Low Match : when the company's response does not match at all. Use this if the investor's preference is a must or must not. 
+
+    Provide the match score as an integer. Only output the match score, with nothing else.
