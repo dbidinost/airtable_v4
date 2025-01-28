@@ -40,7 +40,7 @@ async def v4_assistant_create(company_record, settings):
             "OpenAI-Beta": "assistants=v2"
         }
         response = await client.post("https://api.openai.com/v1/files",
-                                     files=files, data=data, headers=headers)
+                                     files=files, data=data, headers=headers, timeout=30)
 
         if not response.is_success:
             print("Failed File Error:", response.status_code, response.reason_phrase)
@@ -185,19 +185,13 @@ async def v4_process_match(record, settings):
     print("Match cost:", acc_cost)
     Token_Acc_Cost += acc_cost  # cost is calculated in the function
 
-    json_list = json.dumps(match_score_text, indent=4)
+    json_list = json.dumps(match_score_text, indent=4, ensure_ascii=False)
     print("FINAL_MATCH_SCORE:",  match_score)
     print("FINAL_MATCH_SCORE_TEXT:", json_list)
     print(f"FINAL_TOTAL_COST: ${Token_Acc_Cost}")
     #######################
     # 4) Update Airtable Fields
     print("4) Update Airtable Fields...")
-    # field_data = {
-    # 'AI Score': str(match_score),  # Change 'FieldName' to your actual field name
-    # 'AI Text': str(match_score_text),       # Example of updating another field
-    # 'Last run cost': str(Token_Acc_Cost)       # Example of updating another field
-    # }
-    # response = await update_airtable_record("Matches", match_ID, field_data, settings)
     response = await update_airtable_match_record(match_ID, str(match_score), json_list, str(round(Token_Acc_Cost,4)) , settings)
     #print("Airtable Update Response:", response)
     if not response:
@@ -326,7 +320,7 @@ async def match_individual_criteria(investor_preference, company_retrieve, model
     You will also be provided with the company's response to that characteristic.
 
     Your task is to determine the match score between the investor's preference and the company's response. The match score should be one of the following values:
-    - 2: Very High Match : when the company's response is a perfect match to the investor's preference.
+    - 2: Very High Match : when the company's response is a perfect match to the investor's preference. For
     - 1: High Match : when there is some evidence of a match but not strong
     - 0: Neutral Match : there is no evidence of a match or mismatch
     - -1: Low Match : when there is some evidence of a mismatch but not strong
