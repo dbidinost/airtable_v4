@@ -142,6 +142,7 @@ async def v4_process_match(record, settings):
     except KeyError as e:
         assistant_id = None  
     
+    
     if not assistant_id:
         print("Assistant ID not found in company record")
         print("Starting Assistant Creation first...")
