@@ -3,6 +3,7 @@ import openai
 from airtable_functions import fetch_airtable_record, update_airtable_record, update_airtable_match_record
 import json
 import re
+import datetime
 
 
 airtable_base_id = "apps3g53eD7Wzn7rE"
@@ -17,6 +18,9 @@ async def v4_assistant_create(company_record, settings):
     attachments = company_record["fields"].get("Attachments")
     one_line_pitch = company_record["fields"].get("One Line Pitch")
     company_name = company_record["fields"].get("Company Name")
+    solution = company_record["fields"].get("What is your company's solution to this problem?")
+    problem = company_record["fields"].get("What is the problem that your company is addressing?")
+    one_line_pitch = company_record["fields"].get("One Line Pitch")
     ## Currently only one file is supported: 
     if attachments and len(attachments) > 0:
         pdf_url = attachments[0]['url']
@@ -63,7 +67,7 @@ async def v4_assistant_create(company_record, settings):
     headers.update({"Content-Type": "application/json"})
     async with httpx.AsyncClient() as client:
         vectore_store = await client.post("https://api.openai.com/v1/vector_stores",
-                                          json=vector_store_payload, headers=headers)
+                                          json=vector_store_payload, headers=headers, timeout=15.0)
 
         if vectore_store.is_success:
             vs_res = vectore_store.json()
@@ -84,28 +88,33 @@ async def v4_assistant_create(company_record, settings):
     assistant_name = f"v4_{company_name}_-AI_Invest_Assist"
     assistant_payload = {
         "name": assistant_name,
-        "instructions": "You have access to company investment pitches and websites and answer questions about the company and the investment proposition. You provide answers based both on your provided files and general LLM knowledge",
+        "instructions": f"""
+                    You have access to company investment pitch as a file. You answer questions about\
+                    the company and the investment proposition. \
+                    You provide answers based both on your provided files and general LLM knowledge. \
+                    You will also consider the following additional information provided by the entrepreneur:\
+                    <One line pitch> : {one_line_pitch}; <Problem to bo solved>: {problem}; <company's solution>: {solution}
+                    """,
         "tools": [{"type": "file_search"}],
         "tool_resources": {"file_search": {"vector_store_ids": [vs_res['id']]}},
         "model": "gpt-4o"
-    }
+        }
+    #timeout = httpx.Timeout(15.0, connect=60.0)
     async with httpx.AsyncClient() as client:
         assistant = await client.post("https://api.openai.com/v1/assistants",
-                                      json=assistant_payload, headers=headers)
+                                      json=assistant_payload, headers=headers, timeout=15.0)
 
         if assistant.is_success:
             assist_response_data = assistant.json()
             print("Assistant Created Successfully:")
-            print("Assistant:", assist_response_data)
+            #print("Assistant:", assist_response_data)
+            
             return assist_response_data['id']
         else:
             print("Failed to create assistant:")
             print("Status:", assistant.status_code)
             print("Message:", assistant.text)
             return None
-
-
-
 
 #############
 # 
@@ -120,9 +129,9 @@ async def v4_process_match(record, settings):
     # Collect info of the 'Match' fields
     company_ID = record["fields"].get("Company")[0] # get returns an array
     investor_ID = record["fields"].get("Investor")[0]  # get returns an array
-    company_name = record["fields"].get("CompanyName (from Companies)")[0]  #Lookout field 
+    #company_name = record["fields"].get("CompanyName (from Companies)")[0]  #Lookout field 
     match_ID = record['fields'].get("Match ID")  # match object
-
+    print("==== START RUN AT:", datetime.datetime.now())
     #
     # # Collect info of the 'Companies' fields
     # company_url = 'https://api.airtable.com/v0/airtable_base_id/Companies/' + company_ID  # This is inside the fetch_airtable_record function
@@ -135,21 +144,33 @@ async def v4_process_match(record, settings):
     
     if not assistant_id:
         print("Assistant ID not found in company record")
-        response = await update_airtable_match_record(match_ID, 'n/a', 'Assistant not found', '0' , settings)
+        print("Starting Assistant Creation first...")
+        assistant_id = await v4_assistant_create(company_resp, settings)  # Create Assistant
+        print("Assistant ID:", assistant_id)
+
+    if not assistant_id:  #second time around: failed to create assistant
+        print("Assistant ID could not be created")
+        response = await update_airtable_match_record(match_ID, 'n/a', 'Assistant not created', '0' , settings)
         return None
-        
+    else:
+        # In this case, save the assistant ID back to the company record
+        #CompanyID = record['fields'].get("RecordID")
+        response = await update_airtable_record('Companies', company_ID, {'AI-AssistantID': assistant_id}, settings)
     #
     # Collect info of the 'Companies' fields
     #
+    #print("Investor_ID:", investor_ID)
     investor = await fetch_airtable_record("Investors", investor_ID, settings)
-    investor_criteria_text = investor['fields']['Investor Criteria Text']
+    #print("Investor:", investor)
+    #investor_criteria_text = investor['fields']['Investor Criteria Text'] 4.0
     investor_must_config = investor['fields']['Must Config']
-    investor_websites = investor['fields']['Invested Companies Websites']
-    if not investor_criteria_text:  # This is required
-        print("Investor criteria not found")
-        response = await update_airtable_match_record(match_ID, 'n/a', 'Investor criteria not found', '0' , settings)
-        return None
-    print("All Data Fetched Successfully from Airtable...")
+    investor_websites = investor['fields'].get('Invested Companies Websites')
+
+    # if not investor_criteria_text:  # This is required
+    #     print("Investor criteria not found")
+    #     response = await update_airtable_match_record(match_ID, 'n/a', 'Investor criteria not found', '0' , settings)
+    #     return None
+    # print("All Data Fetched Successfully from Airtable...")
 
     ######################
     # Algorithm to match the company and investor:
@@ -158,16 +179,21 @@ async def v4_process_match(record, settings):
     response = await update_airtable_match_record(match_ID, 'Wait Step1/4...', 'Wait Step1/4...', 'Wait Step1/4...' , settings)
     # print("Airtable Update Response:", response)
     # 1) Extract criteria from Investor (as list of object)
-    print("1) Extract criteria from Investor (as list of object)...")
-    model="gpt-3.5-turbo"
-    criteria_list, tokens = extract_airtable_investor_criteria(investor_criteria_text,settings, model)
-    Token_Acc_Cost += calculate_cost_tokens(tokens, model)
-    print(f"1) Criteria List Extracted from Airtable: {criteria_list} and Tokens Cost: ${Token_Acc_Cost}")
+    print("1) Extract criteria from Investor (as list of objects)...")
+    #model="gpt-3.5-turbo"
+    #criteria_list, tokens = extract_airtable_investor_criteria(investor_criteria_text,settings, model)   //4.0 Function Call
+    # 4.1 Function Call: extract_airtable_investor_criteria
+    criteria_list = await extract_airtable_investor_criteria(investor,settings)
+    #Token_Acc_Cost += calculate_cost_tokens(tokens, model)
+    #print(f"1) Criteria List Extracted from Airtable: {criteria_list} and Tokens Cost: ${Token_Acc_Cost}")
+    print(f"1) Criteria List Extracted from Airtable: {criteria_list})")
+    
     ######################  
     # 2) Retrieve all criterias response from Assistant (pitch deck)
     print("2) Retrieve all criterias response from Assistant (pitch deck)...")
     response = await update_airtable_match_record(match_ID, 'Wait Step2/4...', 'Wait Step2/4...', 'Wait Step2/4...' , settings)
     model="gpt-4o-mini"
+    
     updated_criterias_list, retrieval_cost = await retrieve_criteria_from_company(criteria_list, assistant_id,settings, model)
     Token_Acc_Cost += retrieval_cost # cost is calculated in the function
     #print("2) Updated Criterias List:", updated_criterias_list)
@@ -187,7 +213,7 @@ async def v4_process_match(record, settings):
 
     json_list = json.dumps(match_score_text, indent=4, ensure_ascii=False)
     print("FINAL_MATCH_SCORE:",  match_score)
-    print("FINAL_MATCH_SCORE_TEXT:", json_list)
+    #print("FINAL_MATCH_SCORE_TEXT:", json_list)
     print(f"FINAL_TOTAL_COST: ${Token_Acc_Cost}")
     #######################
     # 4) Update Airtable Fields
@@ -198,6 +224,7 @@ async def v4_process_match(record, settings):
         print("Failed to update Airtable record")
         return match_score, match_score_text, Token_Acc_Cost
     print("Airtable Updated Successfully...")
+    print("==== END RUN AT", datetime.datetime.now())
     return match_score, match_score_text, Token_Acc_Cost
 
 
@@ -207,43 +234,33 @@ async def v4_process_match(record, settings):
 # extract_investor_criteria from Airtable Investor Criteria Text
 # output as alist of object  {criteria_name,criteria_text}
 ####
-def extract_airtable_investor_criteria(investor_criteria_text,settings, model):
+async def extract_airtable_investor_criteria(investor,settings):
 
-    delimiter = "####"
-    system_message = f"""
-    You will be provided with a text that describe the criteria of the investor to decide on the investment on a company.\
-    The investor individual criteria  will be delimited with \
-    {delimiter} characters. The individual criteria will have following format:
-    
-    {delimiter} <criteria_name> <new line> 
-    <criteria text>
-    
-    Output a python list of objects, where each object has \
-    the following format::
-        {{"criteria_name" : '<criteria_name>',  "criteria_text" : '<criteria_text>'}}
-       
-    Output the response as a valid python dict, with double quotes.
-    Only output the list of objects, with nothing else.
-    """
+    linked_prefs = investor['fields'].get('Investor Preferences', [])
+    print("Linked Preferences:", linked_prefs)
+    preferences_list = []
+    for pref_id in linked_prefs:
+        # Fetch the specific record by its ID
+        pref_record = await fetch_airtable_record("Investor_Pref", pref_id, settings)
+        # Extract 'Question', 'Preference', and 'Weight' fields
+        question = pref_record['fields'].get('Name (from Question)', '')
+        preference = pref_record['fields'].get('Preference', '')
+        weight = pref_record['fields'].get('Weight', '')
+        
+        # Print the details of each preference
+        print(f"pref_id: {pref_id}  Question: {question}")
+        print(f"pref_id: {pref_id}  Preference: {preference}")
+        print(f"pref_id: {pref_id}  Weight: {weight}")
 
-    messages =  [  
-    {'role':'system', 
-    'content': system_message},    
-    {'role':'user', 
-    'content': investor_criteria_text},  
-    ] 
+        preferences_list.append({
+                'Question': question[0],
+                'Preference': preference,
+                'Weight': weight
+            })
 
-    response_content,  token_dict = get_completion_and_token_count(messages, model=model)
+    return preferences_list
 
-    ## sometimes the response has ```json\n at the beginning and ``` at the end
-    pattern = r'```json\n?|```'
-    response_content = re.sub(pattern, '', response_content)
-    ## End Stripping ```json`
 
-    #print("AFTER STRIPPING Investor Criteria", response_content)
-    json_list = json.loads(response_content)
-    
-    return json_list, token_dict
 
 ####
 # Retrieve all criterias response from Assistant (pitch deck)
@@ -261,15 +278,16 @@ async def retrieve_criteria_from_company(investor_criterias_list, assistant_id,s
     retrieve_cost = 0
     for criteria in investor_criterias_list:
         # Only extract information if the criteria text is not empty:
-        if not criteria['criteria_text']:
-            print("Criteria Text is empty: ", criteria['criteria_name'])
+        if not criteria['Preference']:
+            print("Criteria Text is empty: ", criteria['Question'])
             continue
-        completion_answer, cost = await assistant_process_question(criteria['criteria_name'], thread_id, assistant_id, model)
+        completion_answer, cost = await assistant_process_question(criteria['Question'], thread_id, assistant_id, model)
         retrieve_cost += cost
     # Create a new dictionary with the existing data and the new completion_answer
         updated_criteria = {
-            "criteria_name": criteria['criteria_name'],
-            "investor_preference": criteria['criteria_text'],
+            "criteria_name": criteria['Question'],
+            "investor_preference": criteria['Preference'],
+            "weight":  criteria['Weight'],
             "company_retrieve": completion_answer
             }
         # Append the new dictionary to the updated_criterias_list
@@ -299,7 +317,9 @@ async def match_company_investor(updated_criterias_list, investor_must_config, i
             match_score_list.append({"criteria_name": criteria["criteria_name"], "investor_preference": criteria["investor_preference"],\
                                   "company_retrieve": criteria["company_retrieve"], "score": "HARD CRITERIA NOT MET"})            
             break
-        match_score += int(score)
+        if (criteria["weight"])<1: criteria["weight"]=1
+        if (criteria["weight"])>5: criteria["weight"]=5
+        match_score += int(score)*int(criteria["weight"]) # Added weight in 4.1
         #match_score_text += f"|{criteria["criteria_name"]}|{criteria["company_retrieve"]}|{match_score}|\n"
         match_score_list.append({"criteria_name": criteria["criteria_name"], "investor_preference": criteria["investor_preference"],\
                                   "company_retrieve": criteria["company_retrieve"], "score": score})
@@ -319,16 +339,43 @@ async def match_individual_criteria(investor_preference, company_retrieve, model
     You will be provided with the investor preference about a company characteristic. 
     You will also be provided with the company's response to that characteristic.
 
-    Your task is to determine the match score between the investor's preference and the company's response. The match score should be one of the following values:
-    - 2: Very High Match : when the company's response is a perfect match to the investor's preference. For
-    - 1: High Match : when there is some evidence of a match but not strong
-    - 0: Neutral Match : there is no evidence of a match or mismatch
-    - -1: Low Match : when there is some evidence of a mismatch but not strong
-    - -2: Very Low Match : when the company's response does not match at all. Use this if the investor's preference is a must or must not. 
+    Your task is to determine the match score between the investor's preference and the company's response. \
+        The match score should be one of the following values:
+    - 2: Very High Match : when the company's response is a perfect match to the investor's preference. \
+        If the investor preference is a range, and the company response is within the range, assign 2.
+    - 1: High Match : when there is some evidence of a match but not strong \
+        For example if criteria is a range, assign '1' if the range is not met by 30%, e.g. 4m (millions) against 2-3m
+    - 0: Neutral Match : there is no evidence of a match or mismatch \
+    For example if criteria is a range, assign '0' if the range is not met by 70%. e.g. 5m (millions) against 2-3m
+    - -1: Low Match : when there is some evidence of a mismatch but not strong \
+    For example if criteria is a range, assign '-1' if the range is not met by 100%. e.g. 6m (millions) against 2-3m
+    - -2: Very Low Match : when the company's response does not match at all.  \
+    For example if criteria is a range, assign '-2' if the range is not met by more than  100%. e.g. >6m (millions) \
+        or <1m against 2-3m
+    
+    If the investor preference contain the 'must' word, and the company does not meet the criteria, assign -2.
+    If the investor preference is 'must not' and the company meets the criteria, assign -2, otherwise assign 0.
+
+    SEIS/EIS: SEIS is more restrictive than EIS, so if the investor preference is SEIS, and the company is EIS, assign -1.
+    if the investor preference is EIS, and the company is SEIS or EIS, assign 2.   
+
+    Traction: Strong traction is when the company has a lot of users, and they keep using the product. \
+        Phases/extent of traction (from lowest to highest) are:\
+    Idea, Prototype, MVP or PoC, Beta, Launched, Scaling, Scaled. If the company is in a higher phase than the investor preference, assign 2.\
+    If the company is in a lower phase than the investor preference, assign -2 or -1. If the company is in the same phase, assign 1. \
+    If the company is in a higher phase than the investor preference, assign 2. 
+    
+    Round size: it is the amount of money that the company is looking (seeking) to raise.
+    
+    IP: Strength of IP is determined by: patents (higher), trademarks, copyrights, proprietary trade secrets, nothing in particular (lower).
+
+    Product Market fit: if the company has a stronger product market fit than investor preference, assign 2. \
+        If the company has much weaker product market fit then investor preference, assign -2. Assign -1 , 0, 1 in intermediate cases.
+    
+        
+    If investor does not require a specific criteria, assign 0: if the company nevertheless shows a very positive feature, assign 1. 
 
     Provide the match score as an integer. Only output the match score, with nothing else.
-
-   
     """
     user_message = f"""
         {delimiter} <investor_preference> : {investor_preference} 
@@ -355,6 +402,10 @@ async def assistant_process_question(criteria_text, thread_id, assistant_id, mod
     user_question = f"""Please retrieve the following information from your file about the company: {criteria_text}. 
         respond in few sentences in a very syntetic way, respond as if you are stating the facts of the company about
         {criteria_text}.
+        Round size is the amount of money that the company is looking (seeking) to raise.
+        Pre-money valuation (PMV) is the valuation of the company before the investment.\
+          It could be calculated from the round size and the percentage of the company that the investor is buying.\
+        
         Output the answer as a valid string, with double quotes.
         """
     print("Starting assistant_process_question...")
@@ -392,8 +443,8 @@ async def assistant_process_question(criteria_text, thread_id, assistant_id, mod
  
     cost = calculate_cost_tokens(run.usage, model)
     if run.status == "completed":
-        print("===Run completed with run: ", run)
-        print("===Cost: ", cost)
+        #print("===Run completed with run: ", run)
+        #print("===Cost: ", cost)
         messages = client.beta.threads.messages.list(thread_id=thread_id)
         #print("Run completed with status: " + run.status)
         #print("messages: ", messages)
