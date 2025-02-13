@@ -4,10 +4,21 @@ from airtable_functions import fetch_airtable_record, update_airtable_record, up
 import json
 import re
 import datetime
+import os
+from langchain.text_splitter import RecursiveCharacterTextSplitter, CharacterTextSplitter
+from langchain_community.vectorstores import Chroma, InMemoryVectorStore
+#from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+#from langchain_openai import ChatOpenAI
 
+persist_directory = 'docs/chroma/'
 
-airtable_base_id = "apps3g53eD7Wzn7rE"
-
+#airtable_base_id = "apps3g53eD7Wzn7rE"  V4
+#airtable_base_id = "appf5YIm7Q2CkYiTG"
 #############
 # 
 # ASSISTANT CREATE
@@ -609,10 +620,300 @@ def calculate_cost_tokens(tokens, model):
 
     return total_cost
 
+#############
+# 
+# ASSISTANT CREATE
+# Returns None if failed, or Assistant_ID if successful
+#############  
+async def v5_assistant_create(company_record, settings):
+    # Collect info of the fields
+    attachments = company_record["fields"].get("Attachments")
+    one_line_pitch = company_record["fields"].get("One Line Pitch")
+    company_name = company_record["fields"].get("Company Name")
+    solution = company_record["fields"].get("What is your company's solution to this problem?")
+    problem = company_record["fields"].get("What is the problem that your company is addressing?")
+    one_line_pitch = company_record["fields"].get("One Line Pitch")
+    ## Currently only one file is supported: 
+    if attachments and len(attachments) > 0:
+        fileUrl = attachments[0]['url']  # only one file 
+        fileName = attachments[0]['filename']
+        print(f"fileUrl: {fileUrl}")
+    else:
+        print("Could not find Attachment")
+        return None
+    pages = await v5_load_document(fileUrl, fileName)
+    if not pages:
+        print("Could not load document")
+        return None
+    print(f"Number of pages: {len(pages)}")
+    #print(f"Pages: {pages}")
 
-# ChatCompletion(id='chatcmpl-9yLjfDnwfXv48EPAVfUDFK9ZdO1iA', choices=[Choice(finish
-# _reason='stop', index=0, logprobs=None, message=ChatCompletionMessage(content='Hel
-# lo! How can I assist you today?', role='assistant', function_call=None, tool_calls
-# =None, refusal=None))], created=1724170259, model='gpt-4o-mini-2024-07-18', object
-# ='chat.completion', service_tier=None, system_fingerprint='fp_48196bc89a', usage=C
-# ompletionUsage(completion_tokens=9, prompt_tokens=20, total_tokens=29))
+    for page in pages:
+        print(f"Metadata: {page.metadata}")
+        print(f"Page#: {page.metadata['page']}")
+        print(f"Content: {page.page_content}")
+        
+
+    ### SPITTING TEXT INTO CHUNKS: is this required? 
+    # text_splitter = RecursiveCharacterTextSplitter(
+    # chunk_size = 100,
+    # chunk_overlap  = 0,
+    # length_function = len,
+    # )
+    # chunks = text_splitter.split(pages[0].page_content[0])
+    
+    # Vector search over PDFs
+    vector_store = InMemoryVectorStore.from_documents(pages, OpenAIEmbeddings(api_key=settings.openai_api_key))
+    ### Similarity search is done under the hood: 
+    # docs = vector_store.similarity_search("Approval for EIS/SEIS", k=2)
+    # for doc in docs:
+    #     print(f'Page {doc.metadata["page"]}: {doc.page_content[:200]}\n')
+    
+    # AT THIS POINT, WE HAVE THE VECTOR STORE READY - WE MAY SAVE IT IN THE FILESYSTEM. 
+    return vector_store
+
+
+
+
+#############
+# V5 AI Matching between Company and Investor
+# Returns None if failed, or response_match if successful
+#############  
+async def v5_process_match(record, settings):
+
+    
+    Token_Acc_Cost = 0
+    
+    # FETCH ALL AIRTABLE RECORDS
+    #
+    # Collect info of the 'Match' field
+    company_ID = record["fields"].get("Company")[0] # get returns an array
+    investor_ID = record["fields"].get("Investor")[0]  # get returns an array
+    #company_name = record["fields"].get("CompanyName (from Companies)")[0]  #Lookout field 
+    match_ID = record['fields'].get("Match ID")  # match object
+    print("==== START RUN AT:", datetime.datetime.now())
+    #
+    # COLLECT VECTOR STORE??:
+    company_record = await fetch_airtable_record("Companies", company_ID, settings)
+    # #print("\nresp:", company_resp, "\n")
+    # try:
+    #     assistant_id = company_resp['fields']['AI-AssistantID']
+    # except KeyError as e:
+    #     assistant_id = None  
+    
+    
+    # if not assistant_id:
+    #     print("Assistant ID not found in company record")
+    #     print("Starting Assistant Creation first...")
+    #     assistant_id = await v4_assistant_create(company_resp, settings)  # Create Assistant
+    #     print("Assistant ID:", assistant_id)
+
+    # if not assistant_id:  #second time around: failed to create assistant
+    #     print("Assistant ID could not be created")
+    #     response = await update_airtable_match_record(match_ID, 'n/a', 'Assistant not created', '0' , settings)
+    #     return None
+    # else:
+    #     # In this case, save the assistant ID back to the company record
+    #     #CompanyID = record['fields'].get("RecordID")
+    #     response = await update_airtable_record('Companies', company_ID, {'AI-AssistantID': assistant_id}, settings)
+    #
+    vector_store = await v5_assistant_create(company_record, settings)  # Create VS
+    if not vector_store:  #second time around: failed to create assistant
+        print("vector store could not be created")
+        #response = await update_airtable_match_record(match_ID, 'n/a', 'Assistant not created', '0' , settings)
+        return None
+    # END COLLECT
+    
+
+    investor = await fetch_airtable_record("Investors", investor_ID, settings)
+    print()
+    investor_must_config = investor['fields']['Must Config']
+    investor_websites = investor['fields'].get('Invested Companies Websites')
+
+
+    ######################
+    # Algorithm to match the company and investor:
+    ######################
+    # 0) Wait in Airtable...
+    response = await update_airtable_match_record(match_ID, 'Wait Step1/4...', 'Wait Step1/4...', 'Wait Step1/4...' , settings)
+    # 1) Extract criteria from Investor (as list of object)
+    print("1) Extract criteria from Investor (as list of objects)...")
+    criteria_list = await extract_airtable_investor_criteria(investor,settings)
+    print(f"1) Criteria List Extracted from Airtable: {criteria_list})")
+    ######################  
+    # 2) Retrieve all criterias response from Assistant (pitch deck)
+    ######################
+    print("2) Retrieve all criterias response from Assistant (pitch deck)...")
+    response = await update_airtable_match_record(match_ID, 'Wait Step2/4...', 'Wait Step2/4...', 'Wait Step2/4...' , settings)
+    model="gpt-4o-mini"
+    
+    updated_criterias_list, retrieval_cost = await v5_retrieve_criteria_from_company(criteria_list, vector_store, settings, model)
+    Token_Acc_Cost += retrieval_cost # cost is calculated in the function
+    #print("2) Updated Criterias List:", updated_criterias_list)
+    print(f"2) Updated Criterias List Obtained. The retrieval cost is: {retrieval_cost}$)")
+   
+    if updated_criterias_list == None:
+        print("Could not retrieve criteria from company")
+        return None 
+    ######################  
+    # 3) Match the company and investor and rate 
+    print("3) Match the company and investor and rate...")
+    response = await update_airtable_match_record(match_ID, 'Wait Step3/4...', 'Wait Step3/4...', 'Wait Step3/4...' , settings)
+    model="gpt-4o"
+    match_score, match_score_text, acc_cost = await match_company_investor(updated_criterias_list, investor_must_config, investor_websites,settings, model)
+    print("Match cost:", acc_cost)
+    Token_Acc_Cost += acc_cost  # cost is calculated in the function
+
+    json_list = json.dumps(match_score_text, indent=4, ensure_ascii=False)
+    print("FINAL_MATCH_SCORE:",  match_score)
+    #print("FINAL_MATCH_SCORE_TEXT:", json_list)
+    print(f"FINAL_TOTAL_COST: ${Token_Acc_Cost}")
+    #######################
+    # 4) Update Airtable Fields
+    print("4) Update Airtable Fields...")
+    response = await update_airtable_match_record(match_ID, str(match_score), json_list, str(round(Token_Acc_Cost,4)) , settings)
+    #print("Airtable Update Response:", response)
+    if not response:
+        print("Failed to update Airtable record")
+        return match_score, match_score_text, Token_Acc_Cost
+    print("Airtable Updated Successfully...")
+    print("==== END RUN AT", datetime.datetime.now())
+    return match_score, match_score_text, Token_Acc_Cost
+
+####
+# V5 Retrieve all criterias response from vector store (pitch deck)
+#
+####
+async def v5_retrieve_criteria_from_company(investor_criterias_list, vector_store, settings, model):
+    
+   
+    updated_criterias_list = []
+    retrieve_cost = 0
+    for criteria in investor_criterias_list:
+        # Only extract information if the criteria text is not empty:
+        if not criteria['Preference']:
+            print("Criteria Text is empty: ", criteria['Question'])
+            continue
+        completion_answer, cost = await v5_process_question(criteria['Question'], vector_store, model)
+        retrieve_cost += cost
+    # Create a new dictionary with the existing data and the new completion_answer
+        updated_criteria = {
+            "criteria_name": criteria['Question'],
+            "investor_preference": criteria['Preference'],
+            "weight":  criteria['Weight'],
+            "company_retrieve": completion_answer
+            }
+        # Append the new dictionary to the updated_criterias_list
+        updated_criterias_list.append(updated_criteria)
+
+    return updated_criterias_list, retrieve_cost
+#####
+#
+# V5 Process individual Question from vector store
+#
+#####
+async def v5_process_question(criteria_text, vector_store, model):
+    client = openai.OpenAI()
+    # user_question = f"""Please retrieve the following information from your file about the company: {criteria_text}. 
+    #     respond in few sentences in a very syntetic way, respond as if you are stating the facts of the company about
+    #     {criteria_text}.
+    #     Round size is the amount of money that the company is looking (seeking) to raise.
+    #     Pre-money valuation (PMV) is the valuation of the company before the investment.\
+    #     It could be calculated from the round size and the percentage of the company that the investor is buying.\
+        
+    #     Output the answer as a valid string, with double quotes.
+    #     """
+    print(f"Starting process_question: {criteria_text}")
+    ### V5 
+    retriever = vector_store.as_retriever()  #generic retriever
+    
+    llm = ChatOpenAI()
+
+    system_prompt = (
+        "Use the given context to answer the question. "
+        "If you don't know the answer, say you don't know. "
+        "Use short, factual statements and keep the answer concise."
+        "Output the answer as a valid string, with double quotes."
+        "Context: {context}"
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("human", "{input}"),
+        ]
+    )
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    response = chain.invoke({"input": criteria_text})
+
+    print(  f"v5_process_question Response: {response}")
+    return response, 0
+    #  
+    # cost = calculate_cost_tokens(run.usage, model)
+    # if run.status == "completed":
+    #     messages = client.beta.threads.messages.list(thread_id=thread_id)
+
+    #     for message in messages:
+    #         assert message.content[0].type == "text"
+    #         #print({"role": message.role, "message": message.content[0].text.value})
+    #         return message.content[0].text.value, cost
+    # else:
+    #     if run.status == "failed":   
+    #         print("===Run failed with run: ", run)
+    #         print("===Cost: ", cost)
+    #         return "Failed: treat as null question", cost
+    #     else:
+    #         if run.status == "incomplete":
+    #             print("===Run incomplete with run: ", run)
+    #             print("===Cost: ", cost)
+    #             return "Failed: treat as null question", cost
+            
+
+####
+# LANGCHAIN Load Document
+####
+async def v5_load_document(fileUrl, fileName):
+    
+    
+    from langchain_community.document_loaders import PyPDFLoader,  UnstructuredPowerPointLoader, TextLoader, Docx2txtLoader
+    # Download the file
+    # file_path = download_file(fileUrl)  ???
+    
+
+    if fileName.endswith('.pdf'):
+        loader = PyPDFLoader(file_path = fileUrl)
+    elif fileName.endswith('.pptx'):
+        loader = UnstructuredPowerPointLoader(fileUrl)
+    elif fileName.endswith('.docx'):
+        from langchain.document_loaders import Docx2txtLoader
+        print(f'Loading {fileUrl}')
+        loader = Docx2txtLoader(fileUrl)
+    elif fileName.endswith('.txt'):
+        from langchain.document_loaders import TextLoader
+        print(f'Loading {fileUrl}')
+        loader = TextLoader(fileUrl)
+    else:
+        raise ValueError("Unsupported file type")
+
+        # Load the document using the appropriate loader
+        # document = loader.load(file_path) ???
+        # document = loader.load(fileUrl)
+        # return document
+    pages = []
+    async for page in loader.alazy_load():
+        pages.append(page)
+    return pages
+
+# Useful??
+async def download_file(url):
+    """Download a file from a URL and save it locally."""
+    local_filename = url.split('/')[-1]
+    #response = requests.get(url)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        file_content = response.content
+        response.raise_for_status()
+        with open(local_filename, 'wb') as f:
+            f.write(response.content)
+        return local_filename

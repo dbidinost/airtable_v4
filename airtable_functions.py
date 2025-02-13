@@ -14,8 +14,8 @@ class Settings(BaseSettings):
 
 
 # #settings = Settings()
-airtable_base_id = "apps3g53eD7Wzn7rE"
-
+#airtable_base_id = "apps3g53eD7Wzn7rE"
+airtable_base_id = "appf5YIm7Q2CkYiTG" #Matching_V5
 ###########
 # Utility functions to get and update Airtable records
 ###########
@@ -23,7 +23,8 @@ async def fetch_airtable_record(airtable_table_name:str , record_id: str, settin
     url = f"https://api.airtable.com/v0/{airtable_base_id}/{airtable_table_name}/{record_id}"
     
     #print("fetch_airtable_record, url:", url)
-
+    #print("key: ", settings.airtable_api_key)
+    #print(url)
     headers = {"Authorization": f"Bearer {settings.airtable_api_key}"}
     
     async with httpx.AsyncClient() as client:
