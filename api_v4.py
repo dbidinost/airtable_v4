@@ -7,8 +7,9 @@ import httpx
 import os 
 import uvicorn # type: ignore
 
-from openai_functions import v5_assistant_create, v5_process_match
+from langc import v5_assistant_create
 from airtable_functions import fetch_airtable_record
+from runs import v5_process_run, v5_process_match
 
 class Settings(BaseSettings):
     airtable_api_key: str
@@ -61,4 +62,17 @@ async def use_openai(record_id: str):
         match_score, match_score_text, Token_Acc_Cost = async_result
         return match_score, match_score_text, Token_Acc_Cost
 #
+# Endpoint to process runs 
+# record_id is the record ID of the Match record
+@app.post("/process-run/{record_id}")
+async def process_run(record_id: str):
+    print(f"Run Started, record:{record_id} at: {datetime.now()}")
+    record = await fetch_airtable_record("Runs", record_id, settings)
+    #record = await fetch_airtable_record("tblTpVdB6sjx2y6iL", record_id, settings)
+    async_result = await v5_process_run(record, settings)  
+
+    if async_result is not None:
+        match_score, match_score_text, Token_Acc_Cost = async_result
+        return match_score, match_score_text, Token_Acc_Cost
+
 
