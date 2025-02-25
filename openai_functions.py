@@ -1,12 +1,15 @@
 import httpx, asyncio
 import openai
-from airtable_functions import fetch_airtable_record, update_airtable_record, update_airtable_match_record, update_airtable_step_record, update_airtable_run_complete
+from airtable_functions import fetch_airtable_record, update_airtable_record, update_airtable_match_record,\
+    update_airtable_step_record, update_airtable_run_complete
 import json
 import re
 import datetime
 import os
 
 from langc import v5_retrieve_criteria_from_company, v5_assistant_create  # my langchain.py
+from reports import v4_generate_reports
+from utils_functions import calculate_cost_tokens, v4_thread_create
 #from langchain_openai import ChatOpenAI
 
 
@@ -127,7 +130,13 @@ async def v4_assistant_create(company_record, settings):
 # AI Matching between Company and Investor
 # Returns None if failed, or response_match if successful
 #############  
-async def v4_process_match(run_id, index, total_steps, record, settings):
+async def v4_process_match(index, total_steps, record, settings, run_id=None):
+    # Function to update step:
+    async def airtable_update_step(step_number):
+        match_step_text = f"Step {step_number} / {steps_per_match}..."
+        run_step_text = f"Step {index*steps_per_match+step_number}/{total_steps}..."
+        response = await update_airtable_step_record(run_id, match_ID, match_step_text, run_step_text , settings)
+    
     
     Token_Acc_Cost = 0
     # FETCH ALL AIRTABLE RECORDS
@@ -137,7 +146,10 @@ async def v4_process_match(run_id, index, total_steps, record, settings):
     investor_ID = record["fields"].get("Investor")[0]  # get returns an array
     #company_name = record["fields"].get("CompanyName (from Companies)")[0]  #Lookout field 
     match_ID = record['fields'].get("Match ID")  # match object
-    print("==== START RUN AT:", datetime.datetime.now())
+    generate_reports_flag = record['fields'].get("Generate Reports")
+    steps_per_match = 6 if generate_reports_flag == 'Yes' else 4
+
+    print(f"==== START RUN AT:, {datetime.datetime.now()}, {generate_reports_flag}")
     #
     # # Collect info of the 'Companies' fields
     # company_url = 'https://api.airtable.com/v0/airtable_base_id/Companies/' + company_ID  # This is inside the fetch_airtable_record function
@@ -170,14 +182,14 @@ async def v4_process_match(run_id, index, total_steps, record, settings):
     investor = await fetch_airtable_record("Investors", investor_ID, settings)
     #print("Investor:", investor)
     #investor_criteria_text = investor['fields']['Investor Criteria Text'] 4.0
-    investor_must_config = investor['fields']['Must Config']
+    investor_must_config = investor['fields'].get('Must Config')
     investor_websites = investor['fields'].get('Invested Companies Websites')
     ######################
     # Algorithm to match the company and investor:
     ######################
     # 0) Wait in Airtable...
     #response = await update_airtable_match_record(match_ID, 'Wait Step1/4...', settings)
-    response = await update_airtable_step_record(run_id, match_ID, index, 1, total_steps , settings)
+    await airtable_update_step(1)
     print("1) Extract criteria from Investor (as list of objects)...")
     criteria_list = await extract_airtable_investor_criteria(investor,settings)
     print(f"1) Criteria List Extracted from Airtable: {criteria_list})")
@@ -185,8 +197,8 @@ async def v4_process_match(run_id, index, total_steps, record, settings):
     ######################  
     # 2) Retrieve all criterias response from Assistant (pitch deck)
     print("2) Retrieve all criterias response from Assistant (pitch deck)...")
-    response = await update_airtable_step_record(run_id, match_ID, index, 2, total_steps , settings)
-    
+    await airtable_update_step(2)
+
     model="gpt-4o-mini"
     updated_criterias_list, retrieval_cost = await retrieve_criteria_from_company(criteria_list, assistant_id,settings, model)
     Token_Acc_Cost += retrieval_cost # cost is calculated in the function
@@ -199,21 +211,28 @@ async def v4_process_match(run_id, index, total_steps, record, settings):
     ######################  
     # 3) Match the company and investor and rate 
     print("3) Match the company and investor and rate...")
-    response = await update_airtable_step_record(run_id, match_ID, index, 3, total_steps , settings)
+    await airtable_update_step(3)
     model="gpt-4o"
     match_score, match_score_text, acc_cost = await match_company_investor(updated_criterias_list, investor_must_config, investor_websites,settings, model)
     print("Match cost:", acc_cost)
     Token_Acc_Cost += acc_cost  # cost is calculated in the function
-
     json_list = json.dumps(match_score_text, indent=4, ensure_ascii=False)
-    print("FINAL_MATCH_SCORE:",  match_score)
+    print("Final Match Score:",  match_score)
     #print("FINAL_MATCH_SCORE_TEXT:", json_list)
-    print(f"FINAL_TOTAL_COST: ${Token_Acc_Cost}")
-    #######################
+    await airtable_update_step(4)
+    if generate_reports_flag == 'Yes': 
+        response, cost = await v4_generate_reports(assistant_id, record, settings)
+        Token_Acc_Cost += cost
+
+    print("Final Total Cost:",  Token_Acc_Cost)
+    
+    #####
     # 4) Update Airtable Fields
-    print("4) Update Airtable Fields...")
+    #####
+    print("4) Update Airtable Fields to Complete...")
     response = await update_airtable_match_record(match_ID, match_score, json_list, str(round(Token_Acc_Cost,4)) , settings)
-    response = await update_airtable_run_complete(run_id,'',settings)  # second parameter is error must be empty
+    if run_id is not None:
+        response = await update_airtable_run_complete(run_id,'',settings)  # second parameter is error must be empty
     #print("Airtable Update Response:", response)
     if not response:
         print("Failed to update Airtable record")
@@ -307,7 +326,7 @@ async def match_company_investor(updated_criterias_list, investor_must_config, i
         score, cost = await match_individual_criteria(criteria["investor_preference"], criteria["company_retrieve"], model)
         acc_cost += cost
         # Check if the company has the investor's must-have configuration
-        if investor_must_config == "Hard-must" and score == -2:
+        if investor_must_config == "Hard-Must" and score == -2:
             match_score = -100
             #match_score_text = f"{criteria["criteria_name"]}: Hard-must criteria not met"
             match_score_list.append({"criteria_name": criteria["criteria_name"], "investor_preference": criteria["investor_preference"],\
@@ -332,47 +351,49 @@ async def match_individual_criteria(investor_preference, company_retrieve, model
     #print("match_individual_criteria: Company Retrieve:", company_retrieve)
     delimiter = "####"
     system_match_message = f"""
-    You are assessing how well a company characteristic matches an investor's preference.
-    You are deciding if the match is very high, high, neutral, low or very low. 
-    You will be provided what the investor requires about a company characteristic: <investor_preference> (delimited by {delimiter}).
+    You are evaluation assistant for an investor in startups.
+    You are assess how well, for a given criteria,  a company matches the investor's preferences.
+    You will be provided what the investor requires about the criteria: <investor_preference> (delimited by {delimiter}).
     You will also be provided with the company characteristic: <company_retrieve> (delimited by {delimiter}).
 
-    Your task is to determine how well the company satisfies the investor's preference\
-        The  score should be one of the following values:
-    - 2: Very High: when the company's characteristic satisfies perfectly the investor's preference. \
+    Grade (from -3 to 2) how well the company satisfies the investor preference criteria\
+    Score: 
+
+    2: Very High: when the company satisfies perfectly the investor's preference for this criteria. \
         If the investor preference is a range, and the company characteristic is within the range, assign 2.
-    - 1: High Match : when there is some evidence of a match but not strong \
+    1: High Match : when there is some evidence of a match but not strong \
         For example if characteristic is a range, assign '1' if the range is not met by 30%, e.g. 4m (millions) against 2-3m
-    - 0: Neutral Match : there is no evidence of a match or mismatch \
+    0: Neutral Match : there is no evidence of a match or mismatch \
         For example if characteristic is a range, assign '0' if the range is not met by 70%. e.g. 5m (millions) against 2-3m
         If the investor preference does not require a specific criteria, assign 0.
-    - -1: Low Match : when there is some (but not strong) evidence of a the company not matching the preference  \
-    For example if characteristic is a range, assign '-1' if the range is not met by 100%. e.g. 6m (millions) against 2-3m
-    - -2: Very Low Match : when the company's response does not match at all the required investor preference.  \
-    For example if characteristic is a range, assign '-2' if the range is not met by more than  100%. e.g. >6m (millions) \
+    -1: Low Match : when there is some (but not strong) evidence of a the company not matching the preference  \
+        For example if characteristic is a range, assign '-1' if the range is not met by 100%. e.g. 6m (millions) against 2-3m
+    -2: Very Low Match : when the company's response does not match at all the required investor preference.  \
+        For example if characteristic is a range, assign '-2' if the range is not met by more than  100%. e.g. >6m (millions) \
         or <1m against 2-3m
-        If the investor preference contain the 'must' word, and the company does not meet the criteria, assign -2.
-    If the investor preference is 'must not' and the company meets the criteria, assign -2.
+    -3: Assign -3 only if: 1) the investor preference is a  'must' condition, and the company does not meet the criteria, or \
+        2) if the investor preference is a 'must not' condition and the company meets the criteria.
 
-    SEIS/EIS: SEIS is more demanding than EIS, so if the investor preference has SEIS, and the company is EIS, assign -1.
+        
+    'SEIS/EIS': SEIS is more demanding than EIS, so if the investor preference has SEIS, and the company is EIS, assign -1.
     if the investor preference is EIS, and the company has SEIS or EIS, assign 2.   
 
-    Business Traction characteristic: Strong traction is when the company has a lot of users, and they keep using the product. \
-        Phases/extent of traction (from lowest to highest) are:\
+    'Business Traction' criteria: Strong business traction is when the company has a lot of users, and they keep using the product. \
+        Phases/extent of business traction (from lowest to highest) are:\
         Idea, Prototype, MVP or PoC, Beta, Launched, Scaling, Scaled. 
         If the company is in a higher phase than the investor preference, assign 2.\
         If the company is in a lower phase than the investor preference, assign -2 or -1. If the company is in the same phase, assign 1. \
         If the company is in a higher phase than the investor preference, assign 2. 
          
 
-    Round size: it is the amount of money that the company is looking (seeking) to raise.
+    'Round size': it is the amount of money that the company is looking (seeking) to raise.
     
-    IP: Strength of IP is determined by: patents (higher), trademarks, copyrights, proprietary trade secrets, nothing in particular (lower).
+    'IP': Strength of IP is determined by: patents (higher), trademarks, copyrights, proprietary trade secrets, nothing in particular (lower).
 
-    Product Market fit: if the company has a stronger product market fit than investor preference, assign 2. \
+    'Product Market fit': if the company has a stronger product market fit than investor preference, assign 2. \
         If the company has much weaker product market fit then investor preference, assign -2. Assign -1 , 0, 1 in intermediate cases.
             
-    If investor does not require a specific criteria, assign 0: if the company nevertheless shows a very positive characteristic, assign 1. 
+    If investor does not require a specific preference criteria, assign 0: if the company nevertheless shows a very positive characteristic, assign 1. 
 
     Provide the match score as an integer. Only output the match score, with nothing else.
     """
@@ -501,30 +522,6 @@ async def wait_vector_store_completion(vs_id, settings):
 
     return "completed"
 
-#############
-#
-# Thread Create
-#
-#############
-async def v4_thread_create(settings):
-    client = openai.OpenAI()
-    try:
-        response = client.beta.threads.create(
-             messages=[{
-                "role": "user",
-                "content": "You will retrieve information from your file, and provide factual and synthetic answers to the questions asked",
-                #Uncomment and modify the following line as necessary when including file attachments
-                #"attachments": [{"file_id": attachment_field_id, "tools": [{"type": "file_search"}]}]
-            }]
-        )
-        print("API Response:", response)
-        print("Thread ID:", response.id)
-        return response.id
-
-    except openai.OpenAIError as e:
-        #print("Create Thread Error:", response.status_code, response.text)
-        print("Create Thread Error:", str(e))
-        return None
 
 #############
 #
@@ -577,44 +574,13 @@ def get_completion_and_token_count(messages,
 
     return content,  token_dict
 
-#############
-#
-# Cost of Tokens Calculation
-#
-#############
-def calculate_cost_tokens(tokens, model):
-    pricing = {
-            'gpt-4o': {'input': 2.50, 'output': 10.00},  # per Mtokens
-            'gpt-4o-mini': {'input': 0.15, 'output': 0.60},    # per Mtokens
-            'gpt-4-turbo': {'input': 10.00, 'output': 30.00},  # per Mtokens
-            'gpt-4': {'input': 30.00, 'output': 60.00},       # per Mtokens
-            'gpt-3.5-turbo': {'input': 1.50, 'output': 2.00}       # per Mtokens: currently point to gpt-3.5-turbo-0613
-            }
-    # Check if input is an instance of expected Usage class or a dict
-    if isinstance(tokens, dict):
-        prompt_tokens = tokens['prompt_tokens']
-        completion_tokens = tokens['completion_tokens']
-    else:
-        # Assuming tokens_or_usage is an instance of the Usage class
-        prompt_tokens = tokens.prompt_tokens
-        completion_tokens = tokens.completion_tokens
-
-    # Determine the pricing structure for the model
-    model_pricing = pricing.get(model, {'input': 0.01, 'output': 0.01})  # Default pricing
-
-    # Calculate costs separately for input and output tokens
-    input_cost = prompt_tokens * model_pricing['input'] * 0.000001   #Mtokens
-    output_cost = completion_tokens * model_pricing['output'] * 0.000001   #Mtokens
-    total_cost = input_cost + output_cost  # Optionally recalculated to verify
-
-    return total_cost
 
 
 #############
 # V5 AI Matching between Company and Investor
 # Returns None if failed, or response_match if successful
 #############  
-async def v5_process_match(run_id, index, total_steps, match_record, settings):
+async def v5_process_match(index, total_steps, match_record, settings, run_id=None):
 
     
     Token_Acc_Cost = 0
@@ -696,3 +662,5 @@ async def v5_process_match(run_id, index, total_steps, match_record, settings):
     print("Airtable Updated Successfully...")
     print(f"==== END RUN AT {datetime.datetime.now()}, COMPANY: {company_name}")
     return match_score, match_score_text, Token_Acc_Cost
+
+

@@ -9,7 +9,8 @@ import uvicorn # type: ignore
 
 from langc import v5_assistant_create
 from airtable_functions import fetch_airtable_record
-from runs import v5_process_run, v5_process_match
+from runs import process_run_func
+from openai_functions import v5_process_match, v4_process_match
 
 class Settings(BaseSettings):
     airtable_api_key: str
@@ -55,8 +56,18 @@ async def use_openai(record_id: str):
     #print("Process match, record:", record_id)
     print(f"Match Started, record:{record_id} at: {datetime.now()}")
     record = await fetch_airtable_record("Matches", record_id, settings)
-    #record = await fetch_airtable_record("tblTpVdB6sjx2y6iL", record_id, settings)
-    async_result = await v5_process_match(record, settings)
+    match_version = record['fields'].get("Match Version")
+    generate_reports_flag = record['fields'].get("Generate Reports")
+    steps_per_match = 6 if generate_reports_flag == 'Yes' else 4
+    total_steps = 1 * steps_per_match
+    
+    if match_version.split('.')[0] == '5':    # VERSION 5
+        async_result = await v5_process_match(0, total_steps, record, settings,)  #Run ID not passed
+    elif match_version.split('.')[0] == '4':    # VERSION 4
+        async_result = await v4_process_match(0, total_steps, record, settings,)  #Run ID not passed
+    else :
+        print(f"Version: {match_version} not supported")
+        return None
 
     if async_result is not None:
         match_score, match_score_text, Token_Acc_Cost = async_result
@@ -69,7 +80,7 @@ async def process_run(record_id: str):
     print(f"Run Started, record:{record_id} at: {datetime.now()}")
     record = await fetch_airtable_record("Runs", record_id, settings)
     #record = await fetch_airtable_record("tblTpVdB6sjx2y6iL", record_id, settings)
-    async_result = await v5_process_run(record, settings)  
+    async_result = await process_run_func(record, settings)  
 
     if async_result is not None:
         match_score, match_score_text, Token_Acc_Cost = async_result

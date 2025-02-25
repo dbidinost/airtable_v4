@@ -9,23 +9,25 @@ fast_api_url = "https://nltq7knj-8005.uks1.devtunnels.ms" #This is my FastAPI UR
 ######
 #
 # Process Run 
-#
+# v4 and v5
 #######
-async def v5_process_run(run_record, settings):
+async def process_run_func(run_record, settings):
 
     run_id = run_record["id"]
     companies = run_record["fields"].get("Companies") # get returns an array
     investor_ID = run_record["fields"].get("Investor")[0]  # get returns an array
     matches = run_record["fields"].get("Matches")  # get returns an array
     match_version = run_record['fields'].get("Run Version") 
+    generate_reports_flag = run_record['fields'].get("Generate Reports")
+    print(f"generate_reports_flag: {generate_reports_flag}")
     print(f"Version: {match_version}")
 
     print(f"Companies: {companies}")
     print(f"Investor ID: {investor_ID}")
     print(f"Matches: {matches}")
 
-    # Process each match in the run:
-    total_steps=4*len(matches)
+    steps_per_match = 6 if generate_reports_flag == 'Yes' else 4
+    total_steps = len(matches) * steps_per_match
 
     for index, match in enumerate(matches):
         match_record = await fetch_airtable_record("Matches", match, settings)
@@ -33,15 +35,16 @@ async def v5_process_run(run_record, settings):
         
         #try:   # If current match fails, continue with the next match
         if match_version.split('.')[0] == '5':    # VERSION 5
-                async_result = await v5_process_match(run_id, index, total_steps, match_record, settings)
+                async_result = await v5_process_match(index, total_steps, match_record, settings, run_id)
         elif match_version.split('.')[0] == '4':    # VERSION 4
-                async_result = await v4_process_match(run_id, index, total_steps, match_record, settings)
+                async_result = await v4_process_match(index, total_steps, match_record, settings, run_id)
         else :
                 print(f"Version: {match_version} not supported")
                 return None
         match_score, match_score_text, Token_Acc_Cost = async_result
-        print(f"Match Completed, record_id:{match}, version: {match_version}  at: {datetime.datetime.now()}")
-        print(f"Async_result: {async_result}")
+        print(f"=====MATCH COMPLETED, record_id:{match}, version: {match_version}  at: {datetime.datetime.now()}")
+        #print(f"Async_result: {async_result}")
+
         #except Exception as e:
          #   print(f"Match Failed: {str(e)}, record_id:{match} at: {datetime.datetime.now()}")
         

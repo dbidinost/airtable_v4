@@ -65,19 +65,19 @@ async def update_airtable_match_record(match_ID, score, score_text, token_cost ,
 ###
 # Update a match and run record with intermediate step
 ##
-async def update_airtable_step_record(run_ID, match_ID, index, step, total_steps , settings):
+async def update_airtable_step_record(run_ID, match_ID, match_step_text, run_step_text , settings):
     field_data = {
-        'AI Text': f"Step {step} of 4..."  # Change 'FieldName' to your actual field name
+        'AI Text': match_step_text  # Change 'FieldName' to your actual field name
     }
     response = await update_airtable_record("Matches", match_ID, field_data, settings)
-
-    progress = f"Step {index*4+step} / {total_steps}"
-    field_data = {
-        'Progress': progress  # Change 'FieldName' to your actual field name
-            #   'AI Text': score_text,       # Example of updating another field
-            #   'Last run cost': token_cost       # Example of updating another field
-        }
-    run_air = await update_airtable_record("Runs", run_ID, field_data, settings)
+    if run_ID is not None:  # Update run record if run_ID is provided, otherwise this is a match run
+        progress = run_step_text
+        field_data = {
+            'Progress': progress  # Change 'FieldName' to your actual field name
+                #   'AI Text': score_text,       # Example of updating another field
+                #   'Last run cost': token_cost       # Example of updating another field
+            }
+        run_air = await update_airtable_record("Runs", run_ID, field_data, settings)
     
 ######
 # Set complete status for a run
